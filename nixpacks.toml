@@ -1,0 +1,12 @@
+# Nixpacks build configuration for the AI Tech News Engine backend (Railway).
+# Railway auto-detects Python from requirements.txt; this pins the setup
+# explicitly so the FastAPI service builds and starts reliably.
+
+[phases.setup]
+nixPkgs = ["python311"]
+
+[phases.install]
+cmds = ["pip install --upgrade pip", "pip install -r requirements.txt"]
+
+[start]
+cmd = "cd backend && uvicorn app.main:app --host 0.0.0.0 --port $PORT"

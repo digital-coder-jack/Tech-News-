@@ -12,9 +12,6 @@ venv/
 env/
 .pytest_cache/
 
-# Vercel
-.vercel/
-
 # OS / editor
 .DS_Store
 *.swp

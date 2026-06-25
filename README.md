@@ -36,9 +36,7 @@ input data.
 ## 📁 Project Structure
 
 ```
-├── api/
-│   └── index.py            # Vercel serverless entry (exposes FastAPI `app`)
-├── backend/
+├── backend/                # FastAPI service (deploy as Railway service #1)
 │   ├── app/
 │   │   ├── core/
 │   │   │   ├── config.py       # Loads env vars
@@ -51,13 +49,17 @@ input data.
 │   │   │   └── news_service.py # Multi-source fetch + filter/dedup/rank
 │   │   └── main.py             # FastAPI app
 │   ├── requirements.txt
-│   └── run.py
-├── bot/
-│   ├── bot.py                  # Discord bot
-│   ├── config.py               # Bot env vars
-│   └── requirements.txt
-├── requirements.txt        # Root deps (used by Vercel)
-├── vercel.json             # Vercel build/route config
+│   └── run.py                  # Binds to $PORT (Railway-aware)
+├── bot/                    # Discord bot (deploy as Railway service #2)
+│   ├── bot.py                  # Long-running Discord worker
+│   ├── config.py               # Bot env vars (env-driven)
+│   ├── requirements.txt
+│   ├── railway.json            # Bot service config (start: python bot.py)
+│   └── nixpacks.toml           # Bot build config
+├── requirements.txt        # Backend deps (root, used by Railway)
+├── railway.json            # Backend service config
+├── nixpacks.toml           # Backend build config
+├── Procfile                # Backend start command
 ├── .env.example
 ├── .gitignore
 └── README.md
@@ -92,33 +94,50 @@ The sports item is dropped; the tech item is returned in the strict format.
 
 ---
 
-## ☁️ Deploy to Vercel
+## 🚂 Deploy to Railway
 
-This repo is **Vercel-ready**.
+This repo is **Railway-ready**. Railway runs long-running processes, so it can
+host **both** the backend API and the Discord bot. Deploy them as **two
+services** inside one Railway project.
+
+### Service #1 — Backend API
 
 1. Push the repo to GitHub.
-2. In Vercel, **Import Project** → select the repo (no framework preset needed).
-3. Add the environment variable **`GROQ_API_KEY`** in
-   *Project → Settings → Environment Variables* (optional — the engine still
-   returns a clean ranked digest without it).
-4. **Deploy.**
+2. In Railway, **New Project → Deploy from GitHub repo** and select this repo.
+3. Railway auto-detects Python (via root `requirements.txt` + `nixpacks.toml`)
+   and uses the root `railway.json` / `Procfile` start command:
+   ```
+   cd backend && uvicorn app.main:app --host 0.0.0.0 --port $PORT
+   ```
+4. Add environment variables in **Service → Variables**:
+   - `GROQ_API_KEY` — optional (engine still returns a clean digest without it).
+5. Click **Generate Domain** (Settings → Networking) to get a public URL.
+   Railway injects `PORT` automatically — the app binds to it.
 
-How it works:
-- `vercel.json` builds `api/index.py` with `@vercel/python` and routes all
-  requests to it.
-- `api/index.py` adds `backend/` to the path and exposes the FastAPI `app`.
-- Root `requirements.txt` provides the Python dependencies.
-
-After deploy, test:
+Test after deploy:
 ```
-GET  https://<your-app>.vercel.app/
-GET  https://<your-app>.vercel.app/news/?limit=8
-POST https://<your-app>.vercel.app/news/process
+GET  https://<your-backend>.up.railway.app/
+GET  https://<your-backend>.up.railway.app/news/?limit=8
+POST https://<your-backend>.up.railway.app/news/process
 ```
 
-> Note: Vercel functions are stateless and time-limited. The Discord bot
-> (`bot/`) is a long-running process and should be hosted separately
-> (Railway, Fly.io, a VM, etc.), pointing `API_URL` at your Vercel deployment.
+### Service #2 — Discord Bot (optional)
+
+1. In the **same Railway project**, click **New → GitHub Repo** (same repo).
+2. In that service's **Settings → Root Directory**, set it to `bot`.
+   Railway will then use `bot/railway.json` + `bot/nixpacks.toml`
+   (start command: `python bot.py`).
+3. Add environment variables:
+   - `DISCORD_TOKEN` — your bot token (required).
+   - `API_URL` — the backend's Railway URL from Service #1.
+   - `NEWS_CHANNEL_ID` — channel ID for the daily digest.
+   - `NEWS_POST_HOUR` — UTC hour to post (default `9`).
+
+The bot is a worker (no public port needed). It posts the daily digest and
+replies to @mentions / DMs by calling the backend.
+
+> Tip: You can also deploy the backend alone and skip the bot service if you
+> only need the HTTP API.
 
 ---
 
@@ -145,7 +164,8 @@ python bot.py
 | Variable          | Description                                                  |
 |-------------------|--------------------------------------------------------------|
 | `GROQ_API_KEY`    | From [console.groq.com](https://console.groq.com) (optional) |
-| `DISCORD_TOKEN`   | Bot token from the Discord Developer Portal                  |
-| `NEWS_CHANNEL_ID` | Channel ID to post the daily digest                          |
+| `DISCORD_TOKEN`   | Bot token from the Discord Developer Portal (bot service)    |
+| `NEWS_CHANNEL_ID` | Channel ID to post the daily digest (bot service)            |
 | `NEWS_POST_HOUR`  | UTC hour to post daily news (default: `9`)                   |
 | `API_URL`         | Backend URL (default: `http://127.0.0.1:8000`)               |
+| `PORT`            | Injected by Railway; backend binds to it automatically       |

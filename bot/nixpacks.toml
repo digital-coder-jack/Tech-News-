@@ -1,0 +1,11 @@
+# Nixpacks build configuration for the Discord bot service (Railway).
+# Set this service's Root Directory to `bot/` in the Railway dashboard.
+
+[phases.setup]
+nixPkgs = ["python311"]
+
+[phases.install]
+cmds = ["pip install --upgrade pip", "pip install -r requirements.txt"]
+
+[start]
+cmd = "python bot.py"

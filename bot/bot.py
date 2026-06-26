@@ -43,9 +43,9 @@ async def send_long(channel, header: str, body: str):
 # ── Daily auto-post task ───────────────────────────────────────────────────────
 @tasks.loop(time=time(hour=NEWS_POST_HOUR, minute=0))
 async def post_daily_news():
-    if not NEWS_CHANNEL_ID:
-        print("[bot] NEWS_CHANNEL_ID not set — skipping.")
-        return
+@post_daily_news.before_loop
+async def before_news():
+    await bot.wait_until_ready()
 
     channel = bot.get_channel(NEWS_CHANNEL_ID)
     if not channel:
@@ -72,7 +72,9 @@ async def before_news():
 async def on_ready():
     print(f"[bot] Logged in as {bot.user} (ID: {bot.user.id})")
     print(f"[bot] Prefix: !  |  Daily news: {NEWS_POST_HOUR:02d}:00 UTC → channel {NEWS_CHANNEL_ID}")
-    post_daily_news.start()
+
+    if not post_daily_news.is_running():
+        post_daily_news.start()
 
 
 @bot.event

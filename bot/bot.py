@@ -1,338 +1,204 @@
-"""
-Discord Tech News Bot
-=====================
-
-A minimal, production-ready Discord bot that fetches the latest tech news
-and posts clean, formatted messages to Discord.
-
-Commands
---------
-  !news            -> latest top tech stories from Hacker News
-  !news <n>        -> latest <n> stories (1-10)
-  !rss             -> latest headlines from TechCrunch / The Verge RSS feeds
-  !help            -> show available commands
-
-Design goals
-------------
-  * Self-contained: no database, no separate backend required.
-  * Cloud-ready: configured entirely via environment variables.
-  * Stable: every network call is wrapped in error handling so the bot
-    never crashes on a bad request or a flaky API.
-  * Non-blocking: all HTTP work is async (aiohttp) so the event loop is
-    never blocked. No infinite loops, no time.sleep().
-
-Deployment (Render free tier, "Background Worker"):
-    Build command:  pip install -r requirements.txt
-    Start command:  python bot.py
-"""
-
-from __future__ import annotations
-
-import asyncio
-import logging
-import os
-from typing import Optional
-from xml.etree import ElementTree
-
-import aiohttp
 import discord
-from discord.ext import commands
-from dotenv import load_dotenv
+from discord.ext import commands, tasks
+import aiohttp
+from datetime import time
 
-# ---------------------------------------------------------------------------
-# Configuration (environment variables only — never hardcode secrets)
-# ---------------------------------------------------------------------------
+from config import DISCORD_TOKEN, API_URL, NEWS_CHANNEL_ID, NEWS_POST_HOUR
 
-# Load a local .env file when present. In the cloud (Render), environment
-# variables are injected directly, so this is a harmless no-op there.
-load_dotenv()
-
-DISCORD_TOKEN: Optional[str] = os.getenv("DISCORD_TOKEN")
-
-# Optional backend URL. Not required for core functionality; kept for
-# compatibility with the project spec / future extensions.
-API_URL: str = os.getenv("API_URL", "").strip()
-
-COMMAND_PREFIX: str = os.getenv("COMMAND_PREFIX", "!")
-
-# How many stories to return by default / at most.
-DEFAULT_NEWS_LIMIT = 5
-MAX_NEWS_LIMIT = 10
-
-# External endpoints.
-HN_TOP_STORIES = "https://hacker-news.firebaseio.com/v0/topstories.json"
-HN_ITEM = "https://hacker-news.firebaseio.com/v0/item/{id}.json"
-
-# Optional RSS feeds (no API key required).
-RSS_FEEDS = {
-    "TechCrunch": "https://techcrunch.com/feed/",
-    "The Verge": "https://www.theverge.com/rss/index.xml",
-}
-
-HTTP_TIMEOUT = aiohttp.ClientTimeout(total=20)
-USER_AGENT = "DiscordTechNewsBot/1.0 (+https://render.com)"
-
-# Discord's hard limit on a single message.
-DISCORD_MAX_CHARS = 2000
-
-# ---------------------------------------------------------------------------
-# Logging
-# ---------------------------------------------------------------------------
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-)
-log = logging.getLogger("technews-bot")
-
-# ---------------------------------------------------------------------------
-# Discord client setup
-# ---------------------------------------------------------------------------
-
+# ── Setup ──────────────────────────────────────────────────────────────────────
 intents = discord.Intents.default()
-intents.message_content = True  # Required to read message content / commands.
+intents.message_content = True
 
-bot = commands.Bot(command_prefix=COMMAND_PREFIX, intents=intents, help_command=None)
-
-
-# ---------------------------------------------------------------------------
-# News fetching helpers (all async, all wrapped in error handling)
-# ---------------------------------------------------------------------------
+# help_command=None so we can make our own !help
+bot = commands.Bot(command_prefix="!", intents=intents, help_command=None)
 
 
-async def _get_json(session: aiohttp.ClientSession, url: str):
-    """GET a URL and parse JSON. Returns None on any failure."""
+# ── Helpers ────────────────────────────────────────────────────────────────────
+async def fetch_news_summary(limit: int = 10) -> str | None:
     try:
-        async with session.get(url, timeout=HTTP_TIMEOUT) as resp:
-            resp.raise_for_status()
-            return await resp.json()
-    except Exception as exc:  # noqa: BLE001 - we never want this to crash the bot
-        log.warning("JSON request failed for %s: %s", url, exc)
-        return None
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                f"{API_URL}/news/?limit={limit}",
+                timeout=aiohttp.ClientTimeout(total=60),
+            ) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    return data.get("summary")
+    except Exception as e:
+        print(f"[bot] fetch_news_summary error: {e}")
+    return None
 
 
-async def _get_text(session: aiohttp.ClientSession, url: str) -> Optional[str]:
-    """GET a URL and return the body text. Returns None on any failure."""
-    try:
-        async with session.get(url, timeout=HTTP_TIMEOUT) as resp:
-            resp.raise_for_status()
-            return await resp.text()
-    except Exception as exc:  # noqa: BLE001
-        log.warning("Text request failed for %s: %s", url, exc)
-        return None
+async def send_long(channel, header: str, body: str):
+    """Send a message in chunks if it exceeds Discord's 2000 char limit."""
+    full = header + body
+    if len(full) <= 2000:
+        await channel.send(full)
+    else:
+        await channel.send(header)
+        for chunk in [body[i : i + 1900] for i in range(0, len(body), 1900)]:
+            await channel.send(chunk)
 
 
-async def fetch_hacker_news(limit: int = DEFAULT_NEWS_LIMIT) -> list[dict]:
-    """
-    Fetch the latest top tech stories from the Hacker News API.
+# ── Daily auto-post task ───────────────────────────────────────────────────────
+@tasks.loop(time=time(hour=NEWS_POST_HOUR, minute=0))
+async def post_daily_news():
+    if not NEWS_CHANNEL_ID:
+        print("[bot] NEWS_CHANNEL_ID not set — skipping.")
+        return
 
-    Returns a list of dicts: {title, score, by, url}. Returns an empty list
-    if the API is unreachable (the caller handles the empty case gracefully).
-    """
-    limit = max(1, min(limit, MAX_NEWS_LIMIT))
-    headers = {"User-Agent": USER_AGENT}
+    channel = bot.get_channel(NEWS_CHANNEL_ID)
+    if not channel:
+        print(f"[bot] Channel {NEWS_CHANNEL_ID} not found.")
+        return
 
-    async with aiohttp.ClientSession(headers=headers) as session:
-        top_ids = await _get_json(session, HN_TOP_STORIES)
-        if not top_ids:
-            return []
+    await channel.send("⏳ Fetching today's tech news, hang tight...")
+    summary = await fetch_news_summary(limit=10)
 
-        wanted_ids = top_ids[:limit]
-
-        # Fetch all story items concurrently (non-blocking, no loops of awaits).
-        tasks = [_get_json(session, HN_ITEM.format(id=sid)) for sid in wanted_ids]
-        items = await asyncio.gather(*tasks)
-
-    stories: list[dict] = []
-    for item in items:
-        if not item:
-            continue
-        story_id = item.get("id")
-        stories.append(
-            {
-                "title": item.get("title", "Untitled"),
-                "score": item.get("score", 0),
-                "by": item.get("by", "unknown"),
-                # Some HN posts have no external URL (Ask HN, etc.) -> link to HN.
-                "url": item.get("url")
-                or f"https://news.ycombinator.com/item?id={story_id}",
-            }
-        )
-    return stories
+    if summary:
+        header = "📰 **Daily Tech News Digest**\n━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        await send_long(channel, header, summary)
+    else:
+        await channel.send("⚠️ Couldn't fetch news today. I'll try again tomorrow!")
 
 
-async def fetch_rss(limit: int = DEFAULT_NEWS_LIMIT) -> list[dict]:
-    """
-    Fetch latest headlines from the configured RSS feeds.
-
-    Returns a list of dicts: {title, source, url}. Parsing failures for a
-    single feed are skipped, never raised.
-    """
-    limit = max(1, min(limit, MAX_NEWS_LIMIT))
-    headers = {"User-Agent": USER_AGENT}
-    results: list[dict] = []
-
-    async with aiohttp.ClientSession(headers=headers) as session:
-        for source, feed_url in RSS_FEEDS.items():
-            raw = await _get_text(session, feed_url)
-            if not raw:
-                continue
-            results.extend(_parse_rss(raw, source))
-
-    return results[:limit]
+@post_daily_news.before_loop
+async def before_news():
+    await bot.wait_until_ready()
 
 
-def _parse_rss(raw_xml: str, source: str) -> list[dict]:
-    """Parse RSS/Atom XML into a list of {title, source, url}."""
-    out: list[dict] = []
-    try:
-        root = ElementTree.fromstring(raw_xml)
-    except ElementTree.ParseError as exc:
-        log.warning("Failed to parse RSS from %s: %s", source, exc)
-        return out
-
-    # RSS 2.0: <rss><channel><item><title>/<link>
-    for item in root.iter("item"):
-        title = item.findtext("title")
-        link = item.findtext("link")
-        if title:
-            out.append({"title": title.strip(), "source": source, "url": (link or "").strip()})
-
-    # Atom: <feed><entry><title>/<link href="...">
-    atom_ns = "{http://www.w3.org/2005/Atom}"
-    for entry in root.iter(f"{atom_ns}entry"):
-        title_el = entry.find(f"{atom_ns}title")
-        link_el = entry.find(f"{atom_ns}link")
-        title = title_el.text if title_el is not None else None
-        link = link_el.get("href") if link_el is not None else ""
-        if title:
-            out.append({"title": title.strip(), "source": source, "url": link.strip()})
-
-    return out
+# ── Events ─────────────────────────────────────────────────────────────────────
+@bot.event
+async def on_ready():
+    print(f"[bot] Logged in as {bot.user} (ID: {bot.user.id})")
+    print(f"[bot] Prefix: !  |  Daily news: {NEWS_POST_HOUR:02d}:00 UTC → channel {NEWS_CHANNEL_ID}")
+    post_daily_news.start()
 
 
-# ---------------------------------------------------------------------------
-# Formatting helpers
-# ---------------------------------------------------------------------------
+@bot.event
+async def on_message(message: discord.Message):
+    if message.author.bot:
+        return
+
+    is_dm = isinstance(message.channel, discord.DMChannel)
+    is_mentioned = bot.user.mentioned_in(message)
+    content = message.content.replace(f"<@{bot.user.id}>", "").strip()
+
+    # @mention or DM → chat with AI (skip if it's a command)
+    if (is_dm or is_mentioned) and content and not content.startswith("!"):
+        async with message.channel.typing():
+            try:
+                async with aiohttp.ClientSession() as session:
+                    async with session.post(
+                        f"{API_URL}/chat/",
+                        json={"message": content},
+                        timeout=aiohttp.ClientTimeout(total=30),
+                    ) as resp:
+                        if resp.status == 200:
+                            data = await resp.json()
+                            reply = data.get("reply", "No response.")
+                            await message.channel.send(reply[:2000])
+                        else:
+                            await message.channel.send("⚠️ Backend error. Try again!")
+            except aiohttp.ClientConnectorError:
+                await message.channel.send("⚠️ Can't reach the backend. Is it running?")
+            except Exception as e:
+                print(f"[bot] Mention error: {e}")
+
+    # IMPORTANT: must be last so prefix commands still work
+    await bot.process_commands(message)
 
 
-def format_hn_stories(stories: list[dict]) -> str:
-    """Format Hacker News stories into a clean Discord message."""
-    if not stories:
-        return "⚠️ Couldn't fetch tech news right now. Please try again shortly."
-
-    blocks = ["📰 **Latest Tech News — Hacker News**\n"]
-    for s in stories:
-        blocks.append(
-            f"🔥 **{s['title']}**\n"
-            f"Score: {s['score']} | Author: {s['by']}\n"
-            f"Link: {s['url']}"
-        )
-    return "\n\n".join(blocks)
+@bot.event
+async def on_command_error(ctx, error):
+    if isinstance(error, commands.CommandNotFound):
+        return  # Silently ignore unknown commands
+    elif isinstance(error, commands.MissingRequiredArgument):
+        await ctx.send("⚠️ Missing argument. Type `!help` to see usage.")
+    elif isinstance(error, commands.BadArgument):
+        await ctx.send("⚠️ Invalid argument. Type `!help` to see usage.")
+    else:
+        print(f"[bot] Command error: {error}")
 
 
-def format_rss_items(items: list[dict]) -> str:
-    """Format RSS headlines into a clean Discord message."""
-    if not items:
-        return "⚠️ Couldn't fetch RSS headlines right now. Please try again shortly."
-
-    blocks = ["📰 **Latest Tech Headlines — RSS**\n"]
-    for it in items:
-        blocks.append(f"🔥 **{it['title']}**\nSource: {it['source']}\nLink: {it['url']}")
-    return "\n\n".join(blocks)
-
-
-async def send_long(channel: discord.abc.Messageable, text: str) -> None:
-    """Send text to a channel, splitting safely on Discord's 2000-char limit."""
-    chunk = DISCORD_MAX_CHARS - 10
-    for i in range(0, len(text), chunk):
-        await channel.send(text[i : i + chunk])
-
-
-def _parse_limit(arg: Optional[str]) -> int:
-    """Parse an optional numeric argument into a valid story limit."""
-    if not arg:
-        return DEFAULT_NEWS_LIMIT
-    try:
-        return max(1, min(int(arg), MAX_NEWS_LIMIT))
-    except (ValueError, TypeError):
-        return DEFAULT_NEWS_LIMIT
-
-
-# ---------------------------------------------------------------------------
-# Commands
-# ---------------------------------------------------------------------------
-
+# ── Commands ───────────────────────────────────────────────────────────────────
 
 @bot.command(name="news")
-async def news(ctx: commands.Context, count: Optional[str] = None):
-    """!news [count] -> latest tech news from Hacker News."""
-    limit = _parse_limit(count)
-    async with ctx.typing():
-        stories = await fetch_hacker_news(limit)
-    await send_long(ctx.channel, format_hn_stories(stories))
+async def news_cmd(ctx, limit: int = 5):
+    """Get top tech news on demand. Usage: !news or !news 10"""
+    if not (1 <= limit <= 15):
+        await ctx.send("⚠️ Limit must be between 1 and 15.")
+        return
+
+    status_msg = await ctx.send(f"⏳ Fetching top **{limit}** tech stories...")
+    summary = await fetch_news_summary(limit=limit)
+    await status_msg.delete()
+
+    if summary:
+        header = f"📰 **Top {limit} Tech Stories**\n━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        await send_long(ctx.channel, header, summary)
+    else:
+        await ctx.send("⚠️ Failed to fetch news. Try again in a moment!")
 
 
-@bot.command(name="rss")
-async def rss(ctx: commands.Context, count: Optional[str] = None):
-    """!rss [count] -> latest headlines from TechCrunch / The Verge."""
-    limit = _parse_limit(count)
+@bot.command(name="ask")
+async def ask_cmd(ctx, *, question: str):
+    """Ask the AI anything. Usage: !ask What is Docker?"""
     async with ctx.typing():
-        items = await fetch_rss(limit)
-    await send_long(ctx.channel, format_rss_items(items))
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    f"{API_URL}/chat/",
+                    json={"message": question},
+                    timeout=aiohttp.ClientTimeout(total=30),
+                ) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        reply = data.get("reply", "No response.")
+                        await ctx.send(f"🤖 **Answer:**\n{reply[:1900]}")
+                    else:
+                        await ctx.send("⚠️ Backend error. Try again!")
+        except aiohttp.ClientConnectorError:
+            await ctx.send("⚠️ Can't reach the backend. Is it running?")
+        except Exception as e:
+            print(f"[bot] !ask error: {e}")
+            await ctx.send("⚠️ Something went wrong.")
 
 
 @bot.command(name="help")
-async def help_command(ctx: commands.Context):
-    """!help -> show available commands."""
-    msg = (
-        "🤖 **Tech News Bot — Commands**\n\n"
-        f"`{COMMAND_PREFIX}news` — latest tech news from Hacker News\n"
-        f"`{COMMAND_PREFIX}news 10` — latest 10 stories (max 10)\n"
-        f"`{COMMAND_PREFIX}rss` — latest headlines from TechCrunch / The Verge\n"
-        f"`{COMMAND_PREFIX}help` — show this message"
+async def help_cmd(ctx):
+    """Show all available commands."""
+    embed = discord.Embed(
+        title="🤖 Bot Commands",
+        description="Here's everything I can do:",
+        color=discord.Color.blue(),
     )
-    await ctx.channel.send(msg)
+    embed.add_field(
+        name="📰 `!news [limit]`",
+        value="Get top tech news **right now**.\n`!news` → 5 stories  |  `!news 10` → 10 stories",
+        inline=False,
+    )
+    embed.add_field(
+        name="🤖 `!ask <question>`",
+        value="Ask me anything about tech or coding.\n`!ask What is Docker?`",
+        inline=False,
+    )
+    embed.add_field(
+        name="💬 `@mention` or DM",
+        value="Mention me for a free-form conversation.\n`@BotName explain async/await`",
+        inline=False,
+    )
+    embed.add_field(
+        name="📅 Auto Daily News",
+        value=f"I automatically post a news digest every day at **{NEWS_POST_HOUR:02d}:00 UTC**.",
+        inline=False,
+    )
+    embed.set_footer(text="Powered by Groq AI + Hacker News")
+    await ctx.send(embed=embed)
 
 
-# ---------------------------------------------------------------------------
-# Events / error handling
-# ---------------------------------------------------------------------------
-
-
-@bot.event
-async def on_ready():
-    log.info("Logged in as %s (id=%s)", bot.user, getattr(bot.user, "id", "?"))
-    log.info("Tech News Bot is ready. Prefix: %r", COMMAND_PREFIX)
-
-
-@bot.event
-async def on_command_error(ctx: commands.Context, error: commands.CommandError):
-    """Global command error handler so the bot never crashes."""
-    if isinstance(error, commands.CommandNotFound):
-        return  # Ignore unknown commands silently.
-    log.exception("Command error in %s: %s", getattr(ctx.command, "name", "?"), error)
-    try:
-        await ctx.channel.send("⚠️ Something went wrong handling that command.")
-    except Exception:  # noqa: BLE001
-        pass
-
-
-# ---------------------------------------------------------------------------
-# Entry point
-# ---------------------------------------------------------------------------
-
-
-def main() -> None:
-    if not DISCORD_TOKEN:
-        raise SystemExit(
-            "DISCORD_TOKEN is not set. Configure it as an environment variable "
-            "(see .env.example)."
-        )
-    # bot.run() manages the event loop and reconnections; it does not return
-    # under normal operation and contains no busy/infinite loop of our own.
-    bot.run(DISCORD_TOKEN, log_handler=None)
-
-
+# ── Run ────────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    main()
+    if not DISCORD_TOKEN:
+        raise ValueError("DISCORD_TOKEN is not set in .env file.")
+    bot.run(DISCORD_TOKEN)

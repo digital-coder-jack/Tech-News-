@@ -36,6 +36,8 @@ input data.
 ## 📁 Project Structure
 
 ```
+├── api/                    # Vercel serverless entry point (re-exports FastAPI app)
+│   └── index.py
 ├── backend/                # FastAPI service (deploy as Railway service #1)
 │   ├── app/
 │   │   ├── core/
@@ -56,10 +58,12 @@ input data.
 │   ├── requirements.txt
 │   ├── railway.json            # Bot service config (start: python bot.py)
 │   └── nixpacks.toml           # Bot build config
-├── requirements.txt        # Backend deps (root, used by Railway)
-├── railway.json            # Backend service config
-├── nixpacks.toml           # Backend build config
-├── Procfile                # Backend start command
+├── requirements.txt        # Backend deps (root, used by Railway & Vercel)
+├── railway.json            # Backend service config (Railway)
+├── nixpacks.toml           # Backend build config (Railway)
+├── Procfile                # Backend start command (Railway)
+├── vercel.json             # Vercel build + routing config
+├── .vercelignore           # Files excluded from the Vercel bundle (e.g. bot/)
 ├── .env.example
 ├── .gitignore
 └── README.md
@@ -141,6 +145,46 @@ replies to @mentions / DMs by calling the backend.
 
 ---
 
+## ▲ Deploy to Vercel
+
+The repo is also **Vercel-ready** for the **backend HTTP API**. Vercel runs the
+FastAPI app as a Python **serverless function** via `api/index.py` (which
+re-exports the same `app` from `backend/app/main.py`), and `vercel.json` routes
+all requests to it.
+
+> ⚠️ **Bot not supported on Vercel.** The Discord bot (`bot/`) is a
+> long-running worker and cannot run on Vercel's serverless platform. Use
+> Railway (or any always-on host) for the bot. Vercel hosts the **API only**.
+
+### Steps
+
+1. Push the repo to GitHub.
+2. In Vercel, **Add New… → Project** and import this repo.
+3. Leave the build settings at their defaults — Vercel detects `vercel.json`
+   and the `@vercel/python` runtime automatically. Root `requirements.txt`
+   provides the dependencies.
+4. Add environment variables in **Settings → Environment Variables**:
+   - `GROQ_API_KEY` — optional (engine still returns a clean digest without it).
+5. Click **Deploy**.
+
+Test after deploy:
+```
+GET  https://<your-project>.vercel.app/
+GET  https://<your-project>.vercel.app/news/?limit=8
+POST https://<your-project>.vercel.app/news/process
+POST https://<your-project>.vercel.app/chat/
+```
+
+### Vercel CLI (optional)
+
+```bash
+npm i -g vercel
+vercel          # preview deploy
+vercel --prod   # production deploy
+```
+
+---
+
 ## ⚙️ Local Setup
 
 ```bash
@@ -168,4 +212,4 @@ python bot.py
 | `NEWS_CHANNEL_ID` | Channel ID to post the daily digest (bot service)            |
 | `NEWS_POST_HOUR`  | UTC hour to post daily news (default: `9`)                   |
 | `API_URL`         | Backend URL (default: `http://127.0.0.1:8000`)               |
-| `PORT`            | Injected by Railway; backend binds to it automatically       |
+| `PORT`            | Injected by Railway; backend binds to it automatically (unused on Vercel) |

@@ -1,0 +1,24 @@
+# The Discord bot is a long-running worker and cannot run on Vercel's
+# serverless platform. Exclude it (and other non-API assets) from the
+# Vercel deployment bundle.
+bot/
+
+# Railway/Nixpacks-specific deploy files (not used by Vercel).
+Procfile
+nixpacks.toml
+railway.json
+
+# Dev / docs / VCS noise
+.env
+.env.*
+!.env.example
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+.pytest_cache/
+.idea/
+.vscode/
+*.log
+.DS_Store

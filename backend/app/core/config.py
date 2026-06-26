@@ -5,4 +5,12 @@ load_dotenv()
 
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
-API_URL = os.getenv("API_URL", "http://127.0.0.1:8000")
+
+# Your backend URL (Vercel)
+API_URL = os.getenv("API_URL")
+
+# Discord channel where news will be posted
+NEWS_CHANNEL_ID = int(os.getenv("NEWS_CHANNEL_ID", "0"))
+
+# Hour (UTC) when daily news should be posted
+NEWS_POST_HOUR = int(os.getenv("NEWS_POST_HOUR", "9"))

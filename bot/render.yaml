@@ -1,0 +1,25 @@
+# Render Blueprint for the Discord Tech News Bot.
+#
+# This bot is a long-running process (not a web server), so it runs as a
+# Render "Background Worker". Point Render's Root Directory at `bot/` (or
+# move this file to the repo root if `bot/` is your only service).
+#
+# In the Render dashboard, add the DISCORD_TOKEN environment variable as a
+# secret — do NOT commit your token.
+
+services:
+  - type: worker
+    name: discord-tech-news-bot
+    runtime: python
+    plan: free
+    rootDir: bot
+    buildCommand: pip install -r requirements.txt
+    startCommand: python bot.py
+    autoDeploy: true
+    envVars:
+      - key: DISCORD_TOKEN
+        sync: false        # Set this manually in the dashboard (secret).
+      - key: COMMAND_PREFIX
+        value: "!"
+      - key: API_URL
+        value: ""

@@ -1,7 +1,7 @@
 import discord
 from discord.ext import commands, tasks
 import aiohttp
-from datetime import time
+from datetime import datetime
 
 from config import DISCORD_TOKEN, API_URL, NEWS_CHANNEL_ID, NEWS_POST_HOUR
 
@@ -41,32 +41,34 @@ async def send_long(channel, header: str, body: str):
 
 
 # ── Daily auto-post task ───────────────────────────────────────────────────────
-@tasks.loop(time=time(hour=NEWS_POST_HOUR, minute=0))
+@tasks.loop(minutes=1)
 async def post_daily_news():
-@post_daily_news.before_loop
-async def before_news():
-    await bot.wait_until_ready()
+    now = datetime.utcnow()
 
-    channel = bot.get_channel(NEWS_CHANNEL_ID)
-    if not channel:
-        print(f"[bot] Channel {NEWS_CHANNEL_ID} not found.")
+    # run only at exact hour
+    if now.hour != NEWS_POST_HOUR or now.minute != 0:
         return
 
-    await channel.send("⏳ Fetching today's tech news, hang tight...")
-    summary = await fetch_news_summary(limit=10)
+    try:
+        channel = bot.get_channel(NEWS_CHANNEL_ID)
 
-    if summary:
+        if not channel:
+            print(f"[bot] Channel {NEWS_CHANNEL_ID} not found.")
+            return
+
+        await channel.send("⏳ Fetching today's tech news, hang tight...")
+
+        summary = await fetch_news_summary(limit=10)
+
+        if not summary:
+            await channel.send("⚠️ Couldn't fetch news today. I'll try again tomorrow!")
+            return
+
         header = "📰 **Daily Tech News Digest**\n━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
         await send_long(channel, header, summary)
-    else:
-        await channel.send("⚠️ Couldn't fetch news today. I'll try again tomorrow!")
 
-
-@post_daily_news.before_loop
-async def before_news():
-    await bot.wait_until_ready()
-
-
+    except Exception as e:
+        print(f"[bot] News task error: {e}")
 # ── Events ─────────────────────────────────────────────────────────────────────
 @bot.event
 async def on_ready():

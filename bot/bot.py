@@ -1,6 +1,7 @@
 import discord
 from discord.ext import tasks
 from datetime import time
+import asyncio
 import os
 from dotenv import load_dotenv
 
@@ -18,6 +19,7 @@ client = discord.Client(intents=intents)
 
 
 async def send_long(channel, header: str, body: str):
+    """Split and send messages exceeding Discord's 2000 char limit."""
     full = header + body
     if len(full) <= 2000:
         await channel.send(full)
@@ -39,8 +41,10 @@ async def post_daily_news():
     await channel.send("⏳ Fetching today's tech news, hang tight...")
 
     try:
-        news_items = fetch_tech_news(limit=10)
-        summary = summarize_news(news_items)
+        # Run blocking requests in a thread so Discord heartbeat never freezes
+        news_items = await asyncio.to_thread(fetch_tech_news, 10)
+        summary = await asyncio.to_thread(summarize_news, news_items)
+
         header = "📰 **Daily Tech News Digest**\n━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
         await send_long(channel, header, summary)
         print("[bot] News posted successfully.")
